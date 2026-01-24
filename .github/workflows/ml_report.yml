@@ -1,0 +1,46 @@
+name: ML Dataset Report
+
+'on':
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch: {}
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Если у тебя есть requirements.txt — лучше так:
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # Если проект ставится как пакет:
+          if [ -f pyproject.toml ] || [ -f setup.py ]; then pip install -e .; fi
+
+      - name: Generate ML artifacts (bundle)
+        run: |
+          mkdir -p artifacts/ml
+          python -m agent.fashion.ml.dataset_report \
+            --dataset tests/fixtures/runs_mixed.jsonl \
+            --check --min-runs 2 \
+            --bundle --out-dir artifacts/ml \
+            --stdout
+
+      - name: Upload artifacts (private)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ml-artifacts
+          path: artifacts/ml/
+          if-no-files-found: error
