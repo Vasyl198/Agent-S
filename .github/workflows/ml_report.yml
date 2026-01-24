@@ -37,8 +37,41 @@ jobs:
           python -m agent.fashion.ml.dataset_report \
             --dataset tests/fixtures/runs_mixed.jsonl \
             --check --min-runs 2 \
+            --ci-summary \
+            --compare-baseline --compare-emit \
+            --fail-on-regression \
+            --max-regress-ranker-mrr 0.05 \
+            --max-regress-ranker-top1 0.05 \
+            --max-regress-chooser-flat-rate 0.05 \
+            --baseline-store baselines/ml \
+            --baseline-name main \
             --bundle --out-dir artifacts/ml \
             --stdout
+
+      - name: Commit baseline update (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          export PYTHONPATH="$PYTHONPATH:$GITHUB_WORKSPACE"
+          python -m agent.fashion.ml.dataset_report \
+            --dataset tests/fixtures/runs_mixed.jsonl \
+            --check --min-runs 2 \
+            --ci-summary \
+            --compare-baseline --compare-emit \
+            --fail-on-regression \
+            --max-regress-ranker-mrr 0.05 \
+            --max-regress-ranker-top1 0.05 \
+            --max-regress-chooser-flat-rate 0.05 \
+            --baseline-store baselines/ml \
+            --baseline-name main \
+            --baseline-save-if-ok \
+            --bundle --out-dir artifacts/ml \
+            --stdout
+          # Commit and push baseline if changed
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add baselines/ml/*.json
+          git diff --staged --quiet || git commit -m "Auto-update ML baseline (main)"
+          git push
 
       - name: Upload artifacts (private)
         uses: actions/upload-artifact@v4
