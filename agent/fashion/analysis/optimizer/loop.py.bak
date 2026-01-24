@@ -1,0 +1,566 @@
+"""
+🔄 OPTIMIZATION LOOP — ОСНОВНОЙ ЦИКЛ ОПТИМИЗАЦИИ
+================================================
+
+🎯 Создает Optimization Loop: генерирует → применяет → оценивает → выбирает
+
+❌ НЕ читает геометрию
+✅ Полностью детерминированный
+"""
+
+from typing import List, Dict, Any, Optional, Tuple, Union
+from dataclasses import dataclass, asdict
+from .base import BaseOptimizer, OptimizationResult, DeterministicOptimizer
+from .candidate import OptimizationCandidate, CandidatePool
+from .generator import CandidateGenerator
+from .evaluator import CandidateEvaluator
+
+# Импортируем TargetLibrary для единой точки входа
+try:
+    from ..targets.library import TargetLibrary
+    from ..targets.spec import TargetSpec
+    from ..rule_proposal import propose_rule_changes
+    from ..apply_proposal import apply_proposal_with_target
+except ImportError:
+    # Если targets еще не импортированы, используем заглушки
+    TargetLibrary = None
+    TargetSpec = None
+    propose_rule_changes = None
+    apply_proposal_with_target = None
+
+
+@dataclass(frozen=True)
+class OptimizationStepResult:
+    """Результат одного шага оптимизации"""
+    step_index: int
+    baseline_score: float
+    best_score: float
+    improvement: float
+    chosen_proposal: Optional[Dict[str, Any]]
+    candidates_count: int
+    valid_candidates_count: int
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class OptimizationRunResult:
+    """Результат многошаговой оптимизации"""
+    baseline_score: float
+    final_score: float
+    improvement: float
+    steps: List[Dict[str, Any]]
+    final_model: Any  # PatternModel
+    stopped_reason: str
+    
+    def to_dict(self) -> Dict[str, Any]:
+        d = asdict(self)
+        # final_model не сериализуем тут — только explain_full() выше уровнем, если нужно
+        d["final_model"] = None
+        return d
+
+
+class OptimizationLoop(DeterministicOptimizer):
+    """
+    Основной цикл оптимизации
+    
+    📌 Генерирует предложения → применяет → оценивает → выбирает лучший
+    """
+    
+    def __init__(
+        self, 
+        seed: Optional[int] = None,
+        constraint_validator=None,
+        reward_evaluator=None
+    ):
+        """
+        Инициализировать цикл оптимизации
+        
+        Args:
+            seed: seed для детерминизма
+            constraint_validator: валидатор ограничений
+            reward_evaluator: оценщик качества
+        """
+        super().__init__(seed)
+        
+        self.generator = CandidateGenerator(seed)
+        self.evaluator = CandidateEvaluator(constraint_validator, reward_evaluator)
+    
+    def optimize(self, pattern_model, candidate_count: int = 5, **kwargs) -> OptimizationResult:
+        """
+        Оптимизировать PatternModel
+        
+        Args:
+            pattern_model: исходная модель паттерна
+            candidate_count: количество кандидатов
+            **kwargs: дополнительные параметры
+            
+        Returns:
+            результат оптимизации
+        """
+        # 1. Оцениваем baseline
+        baseline_score = self._evaluate_model(pattern_model)
+        
+        # 2. Генерируем предложения
+        proposals = self.generator.generate_candidates(pattern_model, candidate_count)
+        
+        # Если нет предложений, возвращаем baseline
+        if not proposals:
+            return OptimizationResult(
+                best_score=baseline_score,
+                baseline_score=baseline_score,
+                improvement=0.0,
+                chosen_proposal=None,
+                candidates=[],
+                best_model=pattern_model,
+                baseline_model=pattern_model
+            )
+        
+        # 3. Оцениваем кандидатов
+        candidate_pool = self.evaluator.evaluate_candidates(pattern_model, proposals)
+        
+        # 4. Добавляем baseline как кандидата
+        baseline_candidate = OptimizationCandidate(
+            model=pattern_model,
+            proposal=None,
+            score=baseline_score,
+            is_valid=True
+        )
+        candidate_pool.add_candidate(baseline_candidate)
+        
+        # 5. Выбираем лучшего
+        best_candidate = candidate_pool.get_best_candidate()
+        
+        if best_candidate is None:
+            # Если нет кандидатов, возвращаем baseline
+            return OptimizationResult(
+                best_score=baseline_score,
+                baseline_score=baseline_score,
+                improvement=0.0,
+                chosen_proposal=None,
+                candidates=[],
+                best_model=pattern_model,
+                baseline_model=pattern_model
+            )
+        
+        def optimize_for_target(
+        self, 
+        pattern_model, 
+        target_spec: Union[Dict[str, Any], 'TargetSpec'], 
+        candidate_count: int = 5,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Оптимизировать для конкретной цели (единственная точка входа)
+        
+        Args:
+            pattern_model: исходная модель паттерна
+            target_spec: цель оптимизации (TargetSpec или dict)
+            candidate_count: количество кандидатов
+            **kwargs: дополнительные параметры
+            
+        Returns:
+            результат оптимизации с chosen_target
+        """
+        # Нормализуем и валидируем цель
+        if TargetLibrary is not None and TargetSpec is not None:
+            if isinstance(target_spec, dict):
+                target = TargetLibrary.from_dict(target_spec)
+            else:
+                target = target_spec
+            
+            # Полная валидация цели
+            TargetLibrary.full_validate(target)
+            
+            # Получаем разрешенные пути
+            allowed_paths = TargetLibrary.allowed_paths(target)
+        else:
+            # Fallback если TargetLibrary недоступен
+            target = target_spec
+            allowed_paths = []
+        
+        # 1. Оцениваем baseline
+        baseline_score = self._evaluate_model(pattern_model)
+        
+        # 2. Генерируем explain_graph для proposal engine
+        explain_graph = self._get_explain_graph(pattern_model)
+        
+        # 3. Генерируем предложение через RuleProposalEngine
+        if propose_rule_changes is not None:
+            proposal = propose_rule_changes(explain_graph, target)
+        else:
+            # Fallback - генерируем простое предложение
+            proposal = {"proposed_rule_changes": [], "affected_derived": []}
+        
+        # 4. Применяем предложение с гейтингом
+        if apply_proposal_with_target is not None:
+            new_model = apply_proposal_with_target(pattern_model, proposal, target)
+        else:
+            # Fallback - применяем без гейтинга
+            new_model = self._apply_proposal(pattern_model, proposal)
+        
+        # 5. Оцениваем новую модель
+        final_score = self._evaluate_model(new_model)
+        improvement = final_score - baseline_score
+        
+        # 6. Формируем результат
+        result = {
+            "baseline_score": baseline_score,
+            "final_score": final_score,
+            "improvement": improvement,
+            "chosen_target": target.to_dict() if hasattr(target, 'to_dict') else target,
+            "steps": [{
+                "step_index": 0,
+                "baseline_score": baseline_score,
+                "best_score": final_score,
+                "improvement": improvement,
+                "chosen_proposal": proposal,
+                "candidates_count": 1,
+                "valid_candidates_count": 1 if proposal.get("proposed_rule_changes") else 0
+            }],
+            "best_model": new_model,
+            "baseline_model": pattern_model
+        }
+        
+        return result
+    
+    def _get_explain_graph(self, pattern_model) -> Dict[str, Any]:
+        """Получить explain_graph из модели"""
+        try:
+            if hasattr(pattern_model, 'explain_full'):
+                return pattern_model.explain_full()
+            else:
+                # Fallback - простой explain_graph
+                return {
+                    "type": "pattern_explain_graph",
+                    "intent": {
+                        "manufacturing": pattern_model.manufacturing.__dict__ if pattern_model.manufacturing else {},
+                        "grading": pattern_model.grading.__dict__ if pattern_model.grading else {}
+                    },
+                    "links": []
+                }
+        except Exception:
+            # Если не удалось получить explain_graph
+            return {
+                "type": "pattern_explain_graph",
+                "intent": {},
+                "links": []
+            }
+        
+        # Собираем информацию о кандидатах
+        candidates_info = []
+        for candidate in candidate_pool.get_sorted_candidates():
+            candidates_info.append({
+                "score": candidate.score,
+                "is_valid": candidate.is_valid,
+                "proposal": candidate.proposal,
+                "error_message": candidate.error_message
+            })
+        
+        return OptimizationResult(
+            best_score=best_candidate.score,
+            baseline_score=baseline_score,
+            improvement=improvement,
+            chosen_proposal=best_candidate.proposal,
+            candidates=candidates_info,
+            best_model=best_candidate.model,
+            baseline_model=pattern_model
+        )
+    
+    def run_steps(
+        self,
+        pattern_model,
+        target: Dict[str, Any],
+        *,
+        max_steps: int = 5,
+        epsilon: float = 0.01,
+        strict: bool = True,
+        seed: int = 0,
+        max_candidates_per_step: int = 8,
+    ) -> OptimizationRunResult:
+        """
+        Запустить многошаговую оптимизацию
+        
+        Args:
+            pattern_model: исходная модель паттерна
+            target: цель оптимизации
+            max_steps: максимальное количество шагов
+            epsilon: порог улучшения для остановки
+            strict: строгий режим (не позволяет ухудшение)
+            seed: seed для детерминизма
+            max_candidates_per_step: максимальное количество кандидатов на шаг
+            
+        Returns:
+            результат многошаговой оптимизации
+        """
+        seen_changes = set()  # guard от циклов: (path, from, to)
+        steps: List[Dict[str, Any]] = []
+
+        baseline_score = self._evaluate_model(pattern_model)
+        current_model = pattern_model
+        current_score = baseline_score
+
+        stopped_reason = "max_steps_reached"
+
+        for step_idx in range(max_steps):
+            # 1) сгенерировать кандидатов proposals (детерминированно)
+            candidates = self.generator.generate_candidates(current_model, max_candidates_per_step)
+
+            # фильтр по циклам
+            filtered = []
+            for c in candidates:
+                # ожидаем структуру proposal: {"proposed_rule_changes":[{path,from,to,...}], ...}
+                changes = c.get("proposed_rule_changes", [])
+                if not changes:
+                    continue
+                key = (changes[0].get("path"), changes[0].get("from"), changes[0].get("to"))
+                if key in seen_changes:
+                    continue
+                filtered.append(c)
+
+            # если нет кандидатов — стоп
+            if not filtered:
+                stopped_reason = "no_candidates"
+                break
+
+            # 2) оценить кандидатов
+            evaluated = []
+            valid_count = 0
+
+            for proposal in filtered:
+                new_model = self._apply_proposal(current_model, proposal)
+                constraint_result = self._validate_constraints(new_model)
+                if not constraint_result.ok:
+                    # violations — кандидат можно считать невалидным
+                    continue
+                valid_count += 1
+                reward_result = self._evaluate_model(new_model)
+                score = float(reward_result) if isinstance(reward_result, (int, float)) else float(reward_result.get("total_score", 0.0))
+                evaluated.append((score, proposal, new_model))
+
+            if not evaluated:
+                stopped_reason = "all_candidates_invalid"
+                break
+
+            # 3) выбрать лучшего
+            evaluated.sort(key=lambda x: x[0], reverse=True)
+            best_score, best_proposal, best_model = evaluated[0]
+            improvement = best_score - current_score
+
+            # зафиксировать шаг
+            step_result = OptimizationStepResult(
+                step_index=step_idx,
+                baseline_score=current_score,
+                best_score=best_score,
+                improvement=improvement,
+                chosen_proposal=best_proposal,
+                candidates_count=len(candidates),
+                valid_candidates_count=valid_count
+            )
+            steps.append(step_result.to_dict())
+
+            # guard: пометить выбранное изменение
+            ch = best_proposal.get("proposed_rule_changes", [])
+            if ch:
+                key = (ch[0].get("path"), ch[0].get("from"), ch[0].get("to"))
+                seen_changes.add(key)
+
+            # stop criteria
+            if improvement <= epsilon:
+                stopped_reason = "epsilon_reached"
+                if strict:
+                    break
+                # если не strict — можно продолжать, но обычно не нужно
+                break
+
+            if strict and best_score < current_score:
+                stopped_reason = "score_decreased_strict"
+                break
+
+            # принять лучший и идти дальше
+            current_model = best_model
+            current_score = best_score
+
+        return OptimizationRunResult(
+            baseline_score=baseline_score,
+            final_score=current_score,
+            improvement=current_score - baseline_score,
+            steps=steps,
+            final_model=current_model,
+            stopped_reason=stopped_reason
+        )
+    
+    def _apply_proposal(self, pattern_model, proposal: Dict[str, Any]) -> Any:
+        """Применить предложение к модели"""
+        try:
+            from ..apply_proposal import apply_rule_proposal
+            return apply_rule_proposal(pattern_model, proposal)
+        except ImportError:
+            return pattern_model
+    
+    def _validate_constraints(self, pattern_model) -> Any:
+        """Валидировать ограничения модели"""
+        if self.evaluator.constraint_validator:
+            return self.evaluator.constraint_validator.validate(pattern_model)
+        # Возвращаем mock результат если нет валидатора
+        from types import SimpleNamespace
+        return SimpleNamespace(ok=True)
+    
+    def _evaluate_model(self, pattern_model) -> float:
+        """
+        Оценить модель
+        
+        Args:
+            pattern_model: модель паттерна
+            
+        Returns:
+            оценка качества
+        """
+        return self.evaluator._evaluate_model(pattern_model)
+    
+    @property
+    def name(self) -> str:
+        """Название оптимизатора"""
+        return "optimization_loop"
+    
+    @property
+    def description(self) -> str:
+        """Описание оптимизатора"""
+        return "Детерминированный цикл оптимизации: генерирует → применяет → оценивает → выбирает"
+    
+    def set_constraint_validator(self, constraint_validator) -> None:
+        """
+        Установить валидатор ограничений
+        
+        Args:
+            constraint_validator: валидатор ограничений
+        """
+        self.evaluator.set_constraint_validator(constraint_validator)
+    
+    def set_reward_evaluator(self, reward_evaluator) -> None:
+        """
+        Установить оценщик качества
+        
+        Args:
+            reward_evaluator: оценщик качества
+        """
+        self.evaluator.set_reward_evaluator(reward_evaluator)
+
+
+class MultiStepOptimizer(DeterministicOptimizer):
+    """
+    Многошаговый оптимизатор
+    
+    📌 Применяет оптимизацию несколько раз подряд
+    """
+    
+    def __init__(
+        self, 
+        steps: int = 3,
+        seed: Optional[int] = None,
+        constraint_validator=None,
+        reward_evaluator=None
+    ):
+        """
+        Инициализировать многошаговый оптимизатор
+        
+        Args:
+            steps: количество шагов оптимизации
+            seed: seed для детерминизма
+            constraint_validator: валидатор ограничений
+            reward_evaluator: оценщик качества
+        """
+        super().__init__(seed)
+        self.steps = steps
+        self.base_optimizer = OptimizationLoop(seed, constraint_validator, reward_evaluator)
+    
+    def optimize(self, pattern_model, candidate_count: int = 5, **kwargs) -> OptimizationResult:
+        """
+        Оптимизировать PatternModel за несколько шагов
+        
+        Args:
+            pattern_model: исходная модель паттерна
+            candidate_count: количество кандидатов на шаг
+            **kwargs: дополнительные параметры
+            
+        Returns:
+            результат оптимизации
+        """
+        current_model = pattern_model
+        current_score = self._evaluate_model(pattern_model)
+        
+        all_candidates = []
+        best_proposal = None
+        
+        for step in range(self.steps):
+            # Оптимизируем текущую модель
+            result = self.base_optimizer.optimize(current_model, candidate_count)
+            
+            # Если нет улучшения, останавливаемся
+            if result.best_score <= current_score + 0.001:  # Порог улучшения
+                break
+            
+            # Обновляем текущую модель
+            current_model = result.best_model
+            current_score = result.best_score
+            best_proposal = result.chosen_proposal
+            
+            # Собираем кандидатов
+            all_candidates.extend(result.candidates)
+        
+        return OptimizationResult(
+            best_score=current_score,
+            baseline_score=self._evaluate_model(pattern_model),
+            improvement=current_score - self._evaluate_model(pattern_model),
+            chosen_proposal=best_proposal,
+            candidates=all_candidates,
+            best_model=current_model,
+            baseline_model=pattern_model
+        )
+    
+    def _evaluate_model(self, pattern_model) -> float:
+        """
+        Оценить модель
+        
+        Args:
+            pattern_model: модель паттерна
+            
+        Returns:
+            оценка качества
+        """
+        return self.base_optimizer._evaluate_model(pattern_model)
+    
+    @property
+    def name(self) -> str:
+        """Название оптимизатора"""
+        return "multi_step_optimizer"
+    
+    @property
+    def description(self) -> str:
+        """Описание оптимизатора"""
+        return f"Многошаговый оптимизатор: {self.steps} шагов оптимизации"
+
+
+# Создаем оптимизатор по умолчанию
+default_optimizer = OptimizationLoop()
+
+
+def optimize_pattern_model(pattern_model, **kwargs) -> OptimizationResult:
+    """
+    Оптимизировать PatternModel с оптимизатором по умолчанию
+    
+    Args:
+        pattern_model: модель паттерна
+        **kwargs: дополнительные параметры
+        
+    Returns:
+        результат оптимизации
+    """
+    return default_optimizer.optimize(pattern_model, **kwargs)
+
+
+print("🔄 OptimizationLoop загружен")
+print("📌 Основной цикл оптимизации: генерирует → применяет → оценирует → выбирает")
+print("📌 MultiStepOptimizer — многошаговая оптимизация")
+print("📌 Полностью детерминированный")
