@@ -1,0 +1,29 @@
+{
+  "ok": true,
+  "exit_code": 0,
+  "scope_mode": "default",
+  "scopes": [],
+  "runs_used": 10,
+  "pipelines": {
+    "baseline": 2,
+    "ranker": 3,
+    "chooser": 3,
+    "hybrid": 2
+  },
+  "ranker": {
+    "mrr": 0.61,
+    "top1_accuracy": 0.82,
+    "groups": 10
+  },
+  "chooser": {
+    "flat_rate": 0.12,
+    "mean_entropy": 0.65,
+    "groups": 10
+  },
+  "gates": {
+    "overall_ok": true,
+    "fails": 0,
+    "warns": 0,
+    "violations": []
+  }
+}
