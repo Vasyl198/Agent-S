@@ -28,8 +28,16 @@ jobs:
           pip install numpy pandas scikit-learn
           # Устанавливаем проект как пакет
           pip install -e .
-          # Проверяем что модуль доступен
-          python -c "import agent.fashion.ml.dataset_report; print('Module imported successfully')"
+          # Проверяем что пакет установлен
+          pip show gui-agents
+          # Проверяем PYTHONPATH и доступные модули
+          python -c "import sys; print('Python path:'); [print(p) for p in sys.path]"
+          python -c "import pkgutil; print('Available packages:'); [print(name) for _, name, _ in pkgutil.iter_modules()]"
+          # Пробуем импортировать напрямую
+          python -c "import agent; print('agent module found:', agent.__file__)"
+          python -c "import agent.fashion; print('agent.fashion module found:', agent.fashion.__file__)"
+          python -c "import agent.fashion.ml; print('agent.fashion.ml module found:', agent.fashion.ml.__file__)"
+          python -c "import agent.fashion.ml.dataset_report; print('SUCCESS: Module imported successfully')"
 
       - name: Generate ML artifacts (bundle)
         run: |
