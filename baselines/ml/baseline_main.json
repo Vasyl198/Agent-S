@@ -1,8 +1,10 @@
 {
   "ok": true,
   "exit_code": 0,
-  "scope_mode": "default",
-  "scopes": [],
+  "scope_mode": "scoped",
+  "scopes": [
+    "all"
+  ],
   "runs_used": 4,
   "pipelines": {
     "baseline": 1,
