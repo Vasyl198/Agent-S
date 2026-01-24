@@ -22,23 +22,19 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
+        working-directory: Agent-S-main
         run: |
           python -m pip install --upgrade pip
-          # Устанавливаем базовые зависимости
+          pip install -r requirements.txt || true
           pip install numpy pandas scikit-learn
-          # Добавляем текущую директорию в PYTHONPATH
-          echo "PYTHONPATH=$PYTHONPATH:$GITHUB_WORKSPACE" >> $GITHUB_ENV
-          # Устанавливаем проект как пакет
-          pip install -e .
-          # Проверяем что пакет установлен
-          pip show gui-agents
-          # Проверяем PYTHONPATH
-          echo "PYTHONPATH: $PYTHONPATH"
-          # Пробуем импортировать напрямую с PYTHONPATH
-          python -c "import sys; sys.path.insert(0, '.'); import agent.fashion.ml.dataset_report; print('SUCCESS: Module imported successfully')"
+          # важно: экспорт в ЭТОМ шаге
+          export PYTHONPATH="$PYTHONPATH:$GITHUB_WORKSPACE/Agent-S-main"
+          python -c "import agent.fashion.ml.dataset_report; print('OK: import works')"
 
       - name: Generate ML artifacts (bundle)
+        working-directory: Agent-S-main
         run: |
+          export PYTHONPATH="$PYTHONPATH:$GITHUB_WORKSPACE/Agent-S-main"
           mkdir -p artifacts/ml
           python -m agent.fashion.ml.dataset_report \
             --dataset tests/fixtures/runs_mixed.jsonl \
@@ -50,5 +46,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ml-artifacts
-          path: artifacts/ml/
+          path: Agent-S-main/artifacts/ml/
           if-no-files-found: error
